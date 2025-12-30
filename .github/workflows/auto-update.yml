@@ -1,0 +1,33 @@
+name: Auto Update Blog Posts
+
+on:
+  schedule:
+    # 6시간마다 실행 (UTC 기준: 0시, 6시, 12시, 18시)
+    - cron: '0 */6 * * *'
+  workflow_dispatch:  # 수동 실행 가능
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Fetch and save new posts
+        env:
+          VELOG_USERNAME: ${{ secrets.VELOG_USERNAME }}
+        run: python main.py
+
+      - name: Commit and Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add posts/
+          git diff --staged --quiet || git commit -m "Add new blog post"
+          git push
