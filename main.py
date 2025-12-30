@@ -2,7 +2,8 @@
 """
 벨로그 자동 잔디 심기
 - 벨로그 RSS를 파싱하여 새 글을 마크다운으로 저장
-- GitHub Actions에서 자동 실행되어 잔디를 심음
+- 삭제된 글은 자동으로 삭제
+- README.md에 글 목록 자동 업데이트
 """
 
 import hashlib
@@ -15,6 +16,7 @@ from xml.etree import ElementTree
 
 
 POSTS_DIR = Path("posts")
+README_PATH = Path("README.md")
 
 
 def fetch_rss(username: str) -> str:
@@ -57,11 +59,10 @@ def parse_rss(xml_content: str) -> list[dict]:
 
 def slugify(text: str) -> str:
     """문자열을 파일명으로 사용할 수 있게 변환합니다."""
-    # 한글, 영문, 숫자만 남기고 나머지는 하이픈으로
     text = re.sub(r"[^\w\s가-힣-]", "", text)
     text = re.sub(r"\s+", "-", text.strip())
     text = re.sub(r"-+", "-", text)
-    return text[:50]  # 파일명 길이 제한
+    return text[:50]
 
 
 def get_post_hash(link: str) -> str:
@@ -69,24 +70,23 @@ def get_post_hash(link: str) -> str:
     return hashlib.md5(link.encode()).hexdigest()[:8]
 
 
-def get_existing_post_hashes(posts_dir: Path) -> set[str]:
-    """기존 포스트 파일에서 해시 목록을 추출합니다."""
-    hashes = set()
+def get_existing_posts(posts_dir: Path) -> dict[str, Path]:
+    """기존 포스트 파일에서 해시 -> 파일경로 매핑을 반환합니다."""
+    posts = {}
     if not posts_dir.exists():
-        return hashes
+        return posts
 
     for file in posts_dir.glob("*.md"):
         content = file.read_text(encoding="utf-8")
-        # url 필드에서 링크 추출
         match = re.search(r"url:\s*(.+)", content)
         if match:
             link = match.group(1).strip()
-            hashes.add(get_post_hash(link))
+            posts[get_post_hash(link)] = file
 
-    return hashes
+    return posts
 
 
-def save_post_as_markdown(post: dict, posts_dir: Path) -> bool:
+def save_post_as_markdown(post: dict, posts_dir: Path) -> Path:
     """포스트를 마크다운 파일로 저장합니다."""
     posts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -94,7 +94,6 @@ def save_post_as_markdown(post: dict, posts_dir: Path) -> bool:
     filename = f"{post['date']}-{slug}.md"
     filepath = posts_dir / filename
 
-    # HTML 태그 제거 (간단한 처리)
     description = re.sub(r"<[^>]+>", "", post["description"])
     description = description.strip()
 
@@ -113,11 +112,71 @@ url: {post['link']}
 
     filepath.write_text(content, encoding="utf-8")
     print(f"저장됨: {filename}")
-    return True
+    return filepath
+
+
+def delete_post(filepath: Path) -> None:
+    """포스트 파일을 삭제합니다."""
+    if filepath.exists():
+        print(f"삭제됨: {filepath.name}")
+        filepath.unlink()
+
+
+def sync_posts(posts: list[dict], posts_dir: Path) -> tuple[int, int]:
+    """RSS와 로컬 파일을 동기화합니다. (추가/삭제)"""
+    existing_posts = get_existing_posts(posts_dir)
+    rss_hashes = {get_post_hash(post["link"]) for post in posts}
+
+    new_count = 0
+    deleted_count = 0
+
+    # 새 글 추가
+    for post in posts:
+        post_hash = get_post_hash(post["link"])
+        if post_hash not in existing_posts:
+            save_post_as_markdown(post, posts_dir)
+            new_count += 1
+
+    # 삭제된 글 제거
+    for post_hash, filepath in existing_posts.items():
+        if post_hash not in rss_hashes:
+            delete_post(filepath)
+            deleted_count += 1
+
+    return new_count, deleted_count
+
+
+def generate_readme(posts: list[dict], username: str) -> None:
+    """README.md를 생성합니다."""
+    # 날짜순 정렬 (최신순)
+    sorted_posts = sorted(posts, key=lambda x: x["date"], reverse=True)
+
+    content = f"""# Velog Auto Grass
+
+> **@{username}**의 벨로그 글이 자동으로 동기화됩니다.
+
+## 글 목록
+
+| 날짜 | 제목 |
+|------|------|
+"""
+
+    for post in sorted_posts:
+        title = post["title"].replace("|", "\\|")
+        content += f"| {post['date']} | [{title}]({post['link']}) |\n"
+
+    content += f"""
+---
+
+*마지막 업데이트: {datetime.now().strftime("%Y-%m-%d %H:%M")} UTC*
+"""
+
+    README_PATH.write_text(content, encoding="utf-8")
+    print("README.md 업데이트됨")
 
 
 def main():
-    """메인 함수: RSS를 가져와서 새 글을 저장합니다."""
+    """메인 함수: RSS를 가져와서 동기화합니다."""
     username = os.environ.get("VELOG_USERNAME")
 
     if not username:
@@ -136,19 +195,18 @@ def main():
     posts = parse_rss(xml_content)
     print(f"총 {len(posts)}개의 글 발견")
 
-    existing_hashes = get_existing_post_hashes(POSTS_DIR)
-    new_count = 0
+    new_count, deleted_count = sync_posts(posts, POSTS_DIR)
 
-    for post in posts:
-        post_hash = get_post_hash(post["link"])
-        if post_hash not in existing_hashes:
-            save_post_as_markdown(post, POSTS_DIR)
-            new_count += 1
-
-    if new_count == 0:
-        print("새로운 글이 없습니다.")
+    if new_count == 0 and deleted_count == 0:
+        print("변경사항 없음")
     else:
-        print(f"{new_count}개의 새 글이 저장되었습니다.")
+        if new_count > 0:
+            print(f"{new_count}개의 새 글 추가됨")
+        if deleted_count > 0:
+            print(f"{deleted_count}개의 글 삭제됨")
+
+    # README 업데이트
+    generate_readme(posts, username)
 
 
 if __name__ == "__main__":
