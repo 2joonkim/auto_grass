@@ -29,8 +29,8 @@ jobs:
 
       - name: Commit and Push
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "2joonkim"
+          git config user.email "joon271694@gmail.com"
           git add posts/ README.md
           git diff --staged --quiet || git commit -m "Sync blog posts"
           git push
